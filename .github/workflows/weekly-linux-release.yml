@@ -244,7 +244,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "${{ steps.metadata.outputs.source_commit }}" \
             --title "$release_title" \
-            --notes "Automated six-hourly candidate build from upstream ChatGPT.dmg.\n\nCandidate-Key: $candidate_key\nUpstream DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}\nWrapper commit: ${{ steps.metadata.outputs.source_commit }}\nUpstream commit: ${{ steps.metadata.outputs.upstream_commit }}\nDebian package SHA-256: ${{ steps.package.outputs.deb_sha256 }}\nPackage excludes codex-update-manager; local installation is managed by the host updater."
+            --notes "Automated daily candidate build from upstream ChatGPT.dmg.\n\nCandidate-Key: $candidate_key\nUpstream DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}\nWrapper commit: ${{ steps.metadata.outputs.source_commit }}\nUpstream commit: ${{ steps.metadata.outputs.upstream_commit }}\nDebian package SHA-256: ${{ steps.package.outputs.deb_sha256 }}\nPackage excludes codex-update-manager; local installation is managed by the host updater."
           gh release upload "$release_tag" \
             "${{ steps.package.outputs.deb_path }}" \
             SHA256SUMS upstream-dmg-metadata.json build-metadata.json patch-report.json \
