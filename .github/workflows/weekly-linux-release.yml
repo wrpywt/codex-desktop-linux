@@ -1,9 +1,10 @@
-name: Weekly Linux Release
+name: Codex Desktop Linux Release
 
 on:
   schedule:
-    # 14:00 UTC is 22:00 Asia/Shanghai (Monday).
-    - cron: "0 14 * * 1"
+    # 14:17 UTC is 22:17 Asia/Shanghai. The local updater checks at 22:15.
+    # The candidate-key check skips a build when neither upstream nor the DMG changed.
+    - cron: "17 14 * * *"
   workflow_dispatch:
   push:
     branches: [main]
@@ -16,7 +17,7 @@ permissions:
   attestations: write
 
 concurrency:
-  group: weekly-linux-release
+  group: codex-desktop-linux-release
   cancel-in-progress: false
 
 env:
@@ -26,13 +27,53 @@ env:
 
 jobs:
   build-and-release:
-    name: Build and publish Debian package
+    name: Sync upstream, build, and publish Debian package
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
     steps:
       - name: Check out fork
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync fork main with upstream main
+        id: sync
+        env:
+          UPSTREAM_REPOSITORY: ilysenko/codex-desktop-linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          before_commit="$(git rev-parse HEAD)"
+          upstream_commit="$(git rev-parse refs/remotes/upstream/main)"
+          if git merge-base --is-ancestor "$upstream_commit" HEAD; then
+            sync_action="already-current"
+          elif git merge-base --is-ancestor HEAD "$upstream_commit"; then
+            git merge --ff-only "$upstream_commit"
+            sync_action="fast-forward"
+          else
+            # Keep local automation/features files while bringing in all upstream changes.
+            git merge --no-edit "$upstream_commit"
+            sync_action="merge"
+          fi
+          after_commit="$(git rev-parse HEAD)"
+          if [ "$after_commit" != "$before_commit" ]; then
+            git push origin "HEAD:main"
+            pushed="true"
+          else
+            pushed="false"
+          fi
+          {
+            echo "before_commit=$before_commit"
+            echo "upstream_commit=$upstream_commit"
+            echo "build_commit=$after_commit"
+            echo "sync_action=$sync_action"
+            echo "pushed=$pushed"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -91,8 +132,10 @@ jobs:
           dmg_size_bytes="$(stat -c '%s' "$UPSTREAM_DMG_PATH")"
           tested_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           source_commit="$(git rev-parse HEAD)"
+          upstream_commit="${{ steps.sync.outputs.upstream_commit }}"
           printf 'dmg_sha256=%s\n' "$dmg_sha256" >> "$GITHUB_OUTPUT"
           printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          printf 'upstream_commit=%s\n' "$upstream_commit" >> "$GITHUB_OUTPUT"
           printf 'tested_at_utc=%s\n' "$tested_at_utc" >> "$GITHUB_OUTPUT"
           jq -n \
             --arg url "$UPSTREAM_DMG_URL" \
@@ -103,20 +146,46 @@ jobs:
             --argjson size_bytes "$dmg_size_bytes" \
             --arg tested_at_utc "$tested_at_utc" \
             --arg source_commit "$source_commit" \
+            --arg upstream_commit "$upstream_commit" \
             --arg cache_schema_version "$DMG_CACHE_SCHEMA_VERSION" \
-            '{url:$url,last_modified:$last_modified,etag:$etag,content_length:$content_length,sha256:$sha256,size_bytes:$size_bytes,tested_at_utc:$tested_at_utc,source_commit:$source_commit,cache_schema_version:$cache_schema_version}' \
+            '{url:$url,last_modified:$last_modified,etag:$etag,content_length:$content_length,sha256:$sha256,size_bytes:$size_bytes,tested_at_utc:$tested_at_utc,source_commit:$source_commit,upstream_commit:$upstream_commit,cache_schema_version:$cache_schema_version}' \
             > upstream-dmg-metadata.json
 
+      - name: Skip an unchanged candidate that already has a release
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_key="${{ steps.metadata.outputs.source_commit }}:${{ steps.metadata.outputs.dmg_sha256 }}"
+          existing_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" 2>/dev/null \
+            | jq -r --arg key "$candidate_key" \
+              '.[] | select(.draft == false and .prerelease == false) | select((.body // "") | contains("Candidate-Key: " + $key)) | .tag_name' \
+            | head -n1 || true)"
+          if [ -n "$existing_tag" ]; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+            echo "existing_tag=$existing_tag" >> "$GITHUB_OUTPUT"
+            echo "Candidate already published as $existing_tag; skipping rebuild."
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "existing_tag=" >> "$GITHUB_OUTPUT"
+            echo "No release for candidate key $candidate_key; building."
+          fi
+
       - name: Select the same Linux feature set as the local install
+        if: steps.candidate.outputs.release_exists != 'true'
         run: cp .github/linux-features.json linux-features/features.json
 
       - name: Build app from upstream DMG
+        if: steps.candidate.outputs.release_exists != 'true'
         run: |
           set -euo pipefail
           CODEX_PATCH_REPORT_JSON="$GITHUB_WORKSPACE/patch-report.json" \
-            make build-app DMG="$UPSTREAM_DMG_PATH"
+            make build-app-fresh DMG="$UPSTREAM_DMG_PATH"
 
       - name: Validate patches and wrapper tests
+        if: steps.candidate.outputs.release_exists != 'true'
         run: |
           set -euo pipefail
           node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
@@ -125,6 +194,7 @@ jobs:
 
       - name: Build Debian package without the resident updater
         id: package
+        if: steps.candidate.outputs.release_exists != 'true'
         run: |
           set -euo pipefail
           PACKAGE_WITH_UPDATER=0 MAX_BUILD_THREADS=8 make deb
@@ -139,9 +209,10 @@ jobs:
             --arg deb_name "$deb_name" \
             --arg deb_sha256 "$deb_sha256" \
             --arg source_commit "${{ steps.metadata.outputs.source_commit }}" \
+            --arg upstream_commit "${{ steps.metadata.outputs.upstream_commit }}" \
             --arg dmg_sha256 "${{ steps.metadata.outputs.dmg_sha256 }}" \
             --arg built_at_utc "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-            '{package_version:$package_version,deb_name:$deb_name,deb_sha256:$deb_sha256,source_commit:$source_commit,dmg_sha256:$dmg_sha256,built_at_utc:$built_at_utc,package_with_updater:false}' \
+            '{package_version:$package_version,deb_name:$deb_name,deb_sha256:$deb_sha256,source_commit:$source_commit,upstream_commit:$upstream_commit,dmg_sha256:$dmg_sha256,built_at_utc:$built_at_utc,package_with_updater:false}' \
             > build-metadata.json
           {
             echo "deb_path=$deb_path"
@@ -151,6 +222,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Generate build provenance attestation
+        if: steps.candidate.outputs.release_exists != 'true'
         uses: actions/attest-build-provenance@v2
         continue-on-error: true
         with:
@@ -158,6 +230,7 @@ jobs:
 
       - name: Create or reuse the release
         id: release
+        if: steps.candidate.outputs.release_exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -166,13 +239,12 @@ jobs:
           safe_version="${safe_version//+/-}"
           release_tag="linux-${safe_version}-${{ steps.metadata.outputs.dmg_sha256 }}"
           release_title="Codex Desktop Linux ${safe_version}"
-          if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$release_tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$release_title" \
-              --notes "Automated weekly build from upstream ChatGPT.dmg.\n\n- Upstream DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}\n- Wrapper commit: ${{ steps.metadata.outputs.source_commit }}\n- Debian package SHA-256: ${{ steps.package.outputs.deb_sha256 }}\n- Package excludes codex-update-manager; local installation is managed by the host updater."
-          fi
+          candidate_key="${{ steps.metadata.outputs.source_commit }}:${{ steps.metadata.outputs.dmg_sha256 }}"
+          gh release create "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ steps.metadata.outputs.source_commit }}" \
+            --title "$release_title" \
+            --notes "Automated six-hourly candidate build from upstream ChatGPT.dmg.\n\nCandidate-Key: $candidate_key\nUpstream DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}\nWrapper commit: ${{ steps.metadata.outputs.source_commit }}\nUpstream commit: ${{ steps.metadata.outputs.upstream_commit }}\nDebian package SHA-256: ${{ steps.package.outputs.deb_sha256 }}\nPackage excludes codex-update-manager; local installation is managed by the host updater."
           gh release upload "$release_tag" \
             "${{ steps.package.outputs.deb_path }}" \
             SHA256SUMS upstream-dmg-metadata.json build-metadata.json patch-report.json \
@@ -182,12 +254,19 @@ jobs:
       - name: Write workflow summary
         run: |
           {
-            echo "## Weekly Linux Release"
+            echo "## Codex Desktop Linux Release"
             echo ""
-            echo "- Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/linux-${{ steps.package.outputs.package_version }}-${{ steps.metadata.outputs.dmg_sha256 }}"
-            echo "- Package: ${{ steps.package.outputs.deb_name }}"
-            echo "- Debian SHA-256: ${{ steps.package.outputs.deb_sha256 }}"
-            echo "- Upstream DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}"
-            echo "- Wrapper commit: ${{ steps.metadata.outputs.source_commit }}"
-            echo "- Schedule: Monday 22:00 Asia/Shanghai (14:00 UTC)"
+            echo "- Sync action: ${{ steps.sync.outputs.sync_action }} (pushed: ${{ steps.sync.outputs.pushed }})"
+            echo "- Upstream commit: ${{ steps.sync.outputs.upstream_commit }}"
+            echo "- DMG SHA-256: ${{ steps.metadata.outputs.dmg_sha256 }}"
+            if [ "${{ steps.candidate.outputs.release_exists }}" = "true" ]; then
+              echo "- Existing release: ${{ steps.candidate.outputs.existing_tag }}"
+              echo "- Build: skipped because the candidate key is unchanged"
+            else
+              echo "- Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/linux-${{ steps.package.outputs.package_version }}-${{ steps.metadata.outputs.dmg_sha256 }}"
+              echo "- Package: ${{ steps.package.outputs.deb_name }}"
+              echo "- Debian SHA-256: ${{ steps.package.outputs.deb_sha256 }}"
+            fi
+            echo "- Schedule: daily at 14:17 UTC (22:17 Asia/Shanghai)"
           } >> "$GITHUB_STEP_SUMMARY"
+
