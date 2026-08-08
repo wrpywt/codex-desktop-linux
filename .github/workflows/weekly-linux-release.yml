@@ -62,7 +62,14 @@ jobs:
           fi
           after_commit="$(git rev-parse HEAD)"
           if [ "$after_commit" != "$before_commit" ]; then
-            git push origin "HEAD:main"
+            if ! git push origin "HEAD:main"; then
+              # A connector or another workflow may have advanced main after
+              # checkout. Merge that non-conflicting automation commit once.
+              git fetch --no-tags origin main
+              git merge --no-edit refs/remotes/origin/main
+              git push origin "HEAD:main"
+            fi
+            after_commit="$(git rev-parse HEAD)"
             pushed="true"
           else
             pushed="false"
@@ -74,6 +81,19 @@ jobs:
             echo "sync_action=$sync_action"
             echo "pushed=$pushed"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Keep generated reports out of source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "/patch-report.json"
+            echo "/rebuild-report.json"
+            echo "/upstream-dmg-decision.json"
+            echo "/transactions/"
+            echo "/codex-app/"
+            echo "/dist/"
+          } >> .git/info/exclude
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
