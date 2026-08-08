@@ -1,8 +1,8 @@
 name: Upstream Build App
 
 on:
-  schedule:
-    - cron: '30 * * * *'
+  # Fork override: hourly schedule disabled to conserve Actions minutes.
+  # Pull-request, push, and manual validation remain available.
   pull_request:
     paths:
       - install.sh
