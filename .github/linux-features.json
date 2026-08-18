@@ -1,0 +1,10 @@
+{
+  "enabled": [
+    "appshots",
+    "node-repl-reaper",
+    "persistent-status-panel",
+    "remote-control-ui",
+    "remote-mobile-control",
+    "ui-tweaks"
+  ]
+}
