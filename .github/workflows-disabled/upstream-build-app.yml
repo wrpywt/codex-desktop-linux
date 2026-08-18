@@ -1,3 +1,4 @@
+# Disabled temporarily: move back to .github/workflows/ to re-enable.
 name: Official Linux package build
 run-name: ${{ inputs.release_id && format('Official Linux campaign {0}', inputs.release_id) || format('Official Linux {0}', github.event_name) }}
 

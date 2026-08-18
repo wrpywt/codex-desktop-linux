@@ -1,3 +1,4 @@
+# Disabled temporarily: move back to .github/workflows/ to re-enable.
 name: computer-use sync reminder
 
 # When a merge to main touches the vendored Linux Computer Use crate, open (or

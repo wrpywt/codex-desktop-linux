@@ -1,3 +1,4 @@
+# Disabled temporarily: move back to .github/workflows/ to re-enable.
 name: Update official Linux package pins
 run-name: Linux pin refresh ${{ inputs.release_id }} at ${{ inputs.expected_main_sha }}
 

@@ -1,3 +1,4 @@
+# Disabled temporarily: move back to .github/workflows/ to re-enable.
 name: Install Dependencies
 
 on:
